@@ -1,0 +1,42 @@
+---
+title: "csci385_projectCode"
+author: "Group4_CSCI385"
+format: html
+editor: visual
+---
+
+## Project goals: 
+
+### Importing Data:
+
+```{r}
+
+```
+
+### Cleaning up the Data:
+
+```{r}
+
+```
+
+### E.D.A. :
+
+```{r}
+
+```
+
+### Model:
+
+#### a.) Creation:
+
+```{r}
+
+```
+
+#### b. )Testing:
+
+```{r}
+
+```
+
+### Results/Findings: 
