@@ -5,6 +5,8 @@ format: html
 editor: visual
 ---
 
+This is just a framework to begin on the project. If anyone thinks we should organize this in another way then feel free to change this.
+
 ## Project goals: 
 
 ### Importing Data:
