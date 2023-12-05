@@ -1,0 +1,275 @@
+---
+title: "2019_Modeling"
+format: revealjs
+editor: visual
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, results = "hold")
+library(tidyverse)
+library(sf)
+library(spData)
+library(tidymodels)
+library(modelr)
+```
+
+## Adding Counties
+
+```{r}
+climate_2019 <- read_csv("California Climate Data 1.2019_12.2019.csv")
+```
+
+\-
+
+```{r}
+climate_2019
+View(climate_2019)
+View(climate)
+```
+
+Merging the county variables of the old climate data to the new climate data (based on station).
+
+(NOTE: This leaves about 500 stations without a county. This is a big dataset though, so its probably okay to drop them).
+
+```{r}
+
+climate_2019 <- left_join(climate_2019, select(climate, STATION, map_county), 
+                          join_by(STATION==STATION))
+View(climate_2019)
+```
+
+Convert the DATE column to date values
+
+```{r}
+climate_2019$DATE <- as.Date(climate_2019$DATE, "%m/%d/%Y")
+View(climate_2019)
+```
+
+Group based on county and day.
+
+```{r}
+county_climate_2019 <- filter(climate_2019, !is.na(map_county))
+county_climate_2019 <- group_by(county_climate_2019, map_county, DATE)
+#display number of obsevations in each group
+summarise(county_climate_2019, count=n())
+```
+
+## Find mean daily weather of each county.
+
+BELOW CODE TAKES 15-20 MINUTES TO RUN
+
+```{r}
+climate_means <- summarize(county_climate_2019, across(everything(), mean, 
+                                                       na.rm=TRUE))
+
+```
+
+View data
+
+```{r}
+View(climate_means)
+```
+
+Most of the W## columns resulted in NaN. We may not be able to use those variables in modeling. Also, more stations recorded TMAX than they did TAVG variables.
+
+## Fires Joined With Weather
+
+Now adding weather to the 2019 fires based on their county and the date they started
+
+```{r}
+#my fires_ca data already has map_county
+fires_2019 <- filter(fires_ca, FIRE_YEAR == 2019)
+View(fires_2019)
+fires_2019 <- left_join(fires_2019, climate_means, 
+                        join_by(map_county == map_county, DISCOVERY_DATE == DATE))
+View(fires_2019)
+```
+
+Let's compare the new weather variables to FIRE_SIZE:
+
+```{r}
+ggplot(data = fires_2019, na.rm=TRUE) +
+  geom_point(mapping = aes(x = AWND, y = FIRE_SIZE), alpha = 0.3)
+
+ggplot(data = fires_2019, na.rm=TRUE) +
+  geom_point(mapping = aes(x = PRCP, y = FIRE_SIZE), alpha = 0.3)
+
+ggplot(data = fires_2019, na.rm=TRUE) +
+  geom_point(mapping = aes(x = SNOW, y = FIRE_SIZE), alpha = 0.3)
+
+ggplot(data = fires_2019, na.rm=TRUE) +
+  geom_point(mapping = aes(x = TMAX, y = FIRE_SIZE), alpha = 0.3)
+
+```
+
+Maybe if we remove the giant outlier, we'll see more a pattern?
+
+```{r}
+ggplot(data = filter(fires_2019, FIRE_SIZE < 10000), na.rm=TRUE) +
+  geom_point(mapping = aes(x = AWND, y = FIRE_SIZE), alpha = 0.3)
+
+ggplot(data = filter(fires_2019, FIRE_SIZE < 10000), na.rm=TRUE) +
+  geom_point(mapping = aes(x = PRCP, y = FIRE_SIZE), alpha = 0.3)
+
+ggplot(data = filter(fires_2019, FIRE_SIZE < 10000), na.rm=TRUE) +
+  geom_point(mapping = aes(x = SNOW, y = FIRE_SIZE), alpha = 0.3)
+
+ggplot(data = filter(fires_2019, FIRE_SIZE < 10000), na.rm=TRUE) +
+  geom_point(mapping = aes(x = TMAX, y = FIRE_SIZE), alpha = 0.3)
+
+```
+
+Nothing here is linear. I'm going to try using AWND and TMAX though.
+
+## Fire Size Model
+
+```{r}
+test_split <- initial_split(fires_2019, prop = 0.8)
+test <- testing(test_split)
+nontest <- training(test_split)
+
+
+val_split <- initial_split(nontest, prop = .8)
+validate <- testing(val_split)
+train <- training(val_split)
+
+train
+validate
+test
+```
+
+\-
+
+```{r}
+size_model <- linear_reg() %>%
+  fit(FIRE_SIZE ~ TMAX + AWND, data = train)
+
+predictions <- validate %>%
+  bind_cols(predict(size_model, new_data = validate))
+
+ggplot(data = predictions, mapping = aes(x = FIRE_SIZE, y = .pred)) + 
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red")
+```
+
+This is somehow looks worse than what I got with the monthly normals.
+
+```{r}
+resids <- mutate(predictions, resid = FIRE_SIZE - .pred)
+dplyr::select(resids, FIRE_SIZE, .pred, resid)
+
+ggplot(data = resids, mapping = aes(x = resid)) +
+  geom_density()
+```
+
+\-
+
+```{r}
+yardstick::rsq(predictions, truth = FIRE_SIZE, estimate = .pred)
+yardstick::mae(predictions, truth = FIRE_SIZE, estimate = .pred)
+yardstick::rmse(predictions, truth = FIRE_SIZE, estimate = .pred)
+```
+
+The rsq is a little better, at least.
+
+I think trying to use weather to make a linear model to predict the size of a fire is a lost cause. There doesn't seem to be any linear relations.
+
+# Logistic Regression
+
+*NOTE: I couldn't get this model to work (because I don't really know the proper R functions to use and have only done a little bit of logistic reg in other classes), but I'm leaving this section in anyway*
+
+Using Cristobal's idea, I'm going to define a certain threshold as a "large fire". I'm going to go with fires that are class C (burned at least 10 acres) or larger.
+
+```{r}
+large_fires_2019 <- filter(fires_2019, FIRE_SIZE_CLASS != 'A' 
+                           & FIRE_SIZE_CLASS != 'B')
+View(large_fires_2019)
+```
+
+Now I want each climate_means observation to have a boolean that is TRUE if a large fire occurred in that county on that day.
+
+```{r}
+
+climate_means <- left_join(climate_means, 
+                           select(large_fires_2019, map_county, DISCOVERY_DATE,
+                                  FIRE_SIZE),
+                           join_by(map_county == map_county, 
+                                   DATE == DISCOVERY_DATE))
+View(climate_means)
+```
+
+For every row that found a fire to be joined with, l_fire = 1 (true)
+
+```{r}
+climate_means <- mutate(climate_means, l_fire = 0)
+climate_means$l_fire[!is.na(climate_means$FIRE_SIZE)] <- 1
+
+#l_fire needs to be a factor
+climate_means$l_fire <- as.factor(climate_means$l_fire)
+
+View(climate_means)
+
+```
+
+397 county-date pairs had a large fire (out of 21,330 total observations)
+
+## Graphing
+
+Looking at l_fire vs the weather variables:
+
+```{r}
+ggplot(data = climate_means, na.rm=TRUE) +
+  geom_point(mapping = aes(x = AWND, y = l_fire), alpha = 0.3)
+
+ggplot(data = climate_means, na.rm=TRUE) +
+  geom_point(mapping = aes(x = PRCP, y = l_fire), alpha = 0.3)
+
+ggplot(data = climate_means, na.rm=TRUE) +
+  geom_point(mapping = aes(x = SNOW, y = l_fire), alpha = 0.3)
+
+ggplot(data = climate_means, na.rm=TRUE) +
+  geom_point(mapping = aes(x = TMAX, y = l_fire), alpha = 0.3)
+```
+
+Snow is probably dependent on the temperature, so it doesn't make sense to include both snow and TMAX.
+
+Time to try out the logistic regression function:
+
+```{r}
+test_split <- initial_split(climate_means, prop = 0.8)
+test <- testing(test_split)
+nontest <- training(test_split)
+
+nontest
+test
+```
+
+\-
+
+```{r}
+log_model <- logistic_reg() %>% 
+  fit(l_fire~AWND+PRCP+TMAX, data = nontest)
+
+predictions <- test %>%
+  bind_cols(predict(log_model, new_data = test))
+
+predictions
+```
+
+I don't know how to work with the logistic_reg() function. I'm going to try using the glm version from stats class:
+
+```{r}
+log_model2 <- glm(l_fire~AWND+PRCP+TMAX, family = binomial, data = nontest)
+summary(log_model2)
+```
+
+Manually calculating predictions, rather than using pre-built function:
+
+```{r}
+predictions2 <- mutate(test, pred = 
+                         -9.779 + 0.14*test$AWND - 8.77*test$PRCP + 
+                         0.065*test$TMAX, na.rm = TRUE)
+predictions2
+```
+
+This doesn't work. Apparently this is an error from the climatemeans being grouped variables. I don't know how to fix it.
