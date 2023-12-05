@@ -1,0 +1,270 @@
+---
+title: "Counties and Choropleth"
+format: html
+editor: visual
+---
+
+```{r setup, include=FALSE}
+
+#you'll probably need to install a couple of these
+
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, results = "hold")
+library(tidyverse)
+library(sf)
+library(spData)
+library(tigris)
+library(viridis)
+```
+
+```{r}
+#I'm going to be using the names "climate" and "fires_ca" for our datasets throughout this code
+climate <- read_csv("california_climate_data.csv")
+###for fires_ca, load the RData that Miguel posted in the discord  <-------
+
+#Here I'm doing some additional deletion of columns in the climate data (I forgot to remove these when I first cleaned it)
+climate <- select(climate, everything(), -c(Source.Name, day, hour, DATE))
+
+
+#Converting DISCOVERY_DATE and CONT_DATE to date variables:
+fires_ca$DISCOVERY_DATE <- sub(" 00:00:00+00", "", 
+                               fires_ca$DISCOVERY_DATE, fixed = TRUE)
+fires_ca$DISCOVERY_DATE <- as.Date(fires_ca$DISCOVERY_DATE)
+
+fires_ca$CONT_DATE <- sub(" 00:00:00+00", "", fires_ca$CONT_DATE, fixed = TRUE)
+fires_ca$CONT_DATE <- as.Date(fires_ca$CONT_DATE)
+```
+
+On stackoverflow, I found a function that returns the State of any give lon+lat coordinate:
+
+https://stackoverflow.com/questions/8751497/latitude-longitude-coordinates-to-state-code-in-r/8751965#8751965
+
+```{r}
+### from stack overflow ###
+
+## pointsDF: A data.frame whose first column contains longitudes and
+##           whose second column contains latitudes.
+##
+## states:   An sf MULTIPOLYGON object with 50 states plus DC.
+##
+## name_col: Name of a column in `states` that supplies the states'
+##           names.
+lonlat_to_state <- function(pointsDF,
+                            states = spData::us_states,
+                            name_col = "NAME") {
+    ## Convert points data.frame to an sf POINTS object
+    pts <- st_as_sf(pointsDF, coords = 1:2, crs = 4326)
+
+    ## Transform spatial data to some planar coordinate system
+    ## (e.g. Web Mercator) as required for geometric operations
+    states <- st_transform(states, crs = 3857)
+    pts <- st_transform(pts, crs = 3857)
+
+    ## Find names of [county] (if any) intersected by each point
+    state_names <- states[[name_col]]
+    ii <- as.integer(st_intersects(pts, states))
+    state_names[ii]
+}
+
+## Test the function with points [from the fires dataset]
+testPoints <- data.frame(x = c(-121.0058, -120.4044), y = c(40.03694, 38.93306))
+lonlat_to_state(testPoints)
+```
+
+The above correctly returns California for both points.
+
+However, what we want is to find the *county* of any given coordinate. In order to do this, we need to replace "spData::us_states" with a shapefile of U.S. counties. There is one available through the tigris package.
+
+```{r}
+#creating a shapefile of CA counties using tigris
+
+CA_counties <- counties("California", cb = TRUE)
+
+ggplot() + 
+  geom_sf(data = CA_counties, color="black", fill="white", size=0.25)
+```
+
+Now we have a map of counties that we can use to find the county of any given coordinate point.
+
+Here is my function made from modifiyng the one I found on stackoverflow. This will return the county instead of the state.
+
+```{r}
+##My edit of the stack-overflow to make a version that outputs counties
+#switch out spData of states to the downloaded county map
+
+lonlat_to_county <- function(pointsDF,
+                            county_data = CA_counties,
+                            name_col = "NAME") {
+    ## Convert points data.frame to an sf POINTS object
+    pts <- st_as_sf(pointsDF, coords = 1:2, crs = 4326)
+
+    ## Transform spatial data to some planar coordinate system
+    ## (e.g. Web Mercator) as required for geometric operations
+    county_data <- st_transform(county_data, crs = 3857)
+    pts <- st_transform(pts, crs = 3857)
+
+    ## Find names of state (if any) intersected by each point
+    county_names <- county_data[[name_col]]
+    ii <- as.integer(st_intersects(pts, county_data))
+    county_names[ii]
+}
+
+## Test the function with points [from the fires dataset]
+#remember: long THEN lat
+testPoints <- data.frame(x = c(-121.0058, -120.4044, -121.0339), 
+                         y = c(40.03694, 38.93306, 39.61861))
+lonlat_to_county(testPoints)
+```
+
+Next, I'm going to use this function to find the county of every fire in our fires dataset, and add it to a column called "map_county"
+
+```{r}
+#Add a new county to every fire, as determined by our function
+
+fires_ca <- mutate(fires_ca, map_county = lonlat_to_county(
+  data.frame(x = c(LONGITUDE), y = c(LATITUDE))
+  ))
+
+View(fires_ca)
+```
+
+I'm aware that there was already a column with county names in the original dataset. You may also notice that, for some fires, this function returns a different county than what it was originally listed as. My proposal is: **we ignore the original counties in the dataset and use the "map_county" column instead.**
+
+My reasoning is
+
+-   Some of the counties in the original dataset seem incorrect. For example, a fire that took place at \[32.897, -114.5\] is listed as being in Glenn county in the original dataset. That coordinate location is no where near Glenn. It is in Imperial, which is what the function returns.
+
+-   We can use the county map from the tigris library to make choropleth maps. In order to do that, what we define as the boundaries between counties should be consistent between our datasets and the map's geometry. Therefore, we should use the boundaries of the tigris map to define the counties.
+
+The function does leave 70 fires without a county, but considering the large size of the dataset, losing 70 fires isn't that big of a deal.
+
+Now we can use the function on something even more important: the climate data. Our climate data didn't come with a county column, but now we can find the county of each weather station using the function.
+
+```{r}
+climate <- mutate(climate, map_county = lonlat_to_county(
+  data.frame(x = c(LONGITUDE), y = c(LATITUDE))
+  ))
+
+View(climate)
+```
+
+And now every weather station (except 2) has a county. We can afford to lose only 2 of them.
+
+It's important to note that our climate data is recordings of the monthly averages for each station. Because of this, I think it is convenient to have easy accesses to the month a fire occurred in, so that we can later compare the fires to the climate data.
+
+(Note that you first have to convert the DISCOVERY_DATE column to a date type for the below code to work. I did that near the top of this document)
+
+```{r}
+fires_ca <- mutate(fires_ca, month = month(fires_ca$DISCOVERY_DATE, label = FALSE))
+
+View(fires_ca)
+```
+
+Next we need to group the climate dataset together on shared county+month pairs if we want to find the monthly averages for each county.
+
+```{r}
+county_climate <- group_by(climate, map_county, month)
+#display number of obsevations in each group
+summarise(county_climate, count=n())
+```
+
+Creating a dataset that contains the average weather for each month in each county:
+
+```{r}
+climate_means <- summarize(county_climate, across(everything(), mean, na.rm=TRUE))
+climate_means <- select(climate_means, everything(), -c(STATION, NAME))
+View(climate_means)
+```
+
+Now we use the climate_means dataset to join its attributes to the geometry of the CA_counties dataset. I want to have the data to make a map for any individual month, so I'm making 12 new datasets.
+
+```{r}
+jan_CA_counties <- left_join(CA_counties, filter(climate_means, month == 1),
+                             by = c("NAME" = "map_county"))
+feb_CA_counties <- left_join(CA_counties, filter(climate_means, month == 2),
+                             by = c("NAME" = "map_county"))
+mar_CA_counties <- left_join(CA_counties, filter(climate_means, month == 3),
+                             by = c("NAME" = "map_county"))
+apr_CA_counties <- left_join(CA_counties, filter(climate_means, month == 4),
+                             by = c("NAME" = "map_county"))
+may_CA_counties <- left_join(CA_counties, filter(climate_means, month == 5),
+                             by = c("NAME" = "map_county"))
+jun_CA_counties <- left_join(CA_counties, filter(climate_means, month == 6),
+                             by = c("NAME" = "map_county"))
+jul_CA_counties <- left_join(CA_counties, filter(climate_means, month == 7),
+                             by = c("NAME" = "map_county"))
+aug_CA_counties <- left_join(CA_counties, filter(climate_means, month == 8),
+                             by = c("NAME" = "map_county"))
+sep_CA_counties <- left_join(CA_counties, filter(climate_means, month == 9),
+                             by = c("NAME" = "map_county"))
+oct_CA_counties <- left_join(CA_counties, filter(climate_means, month == 10),
+                             by = c("NAME" = "map_county"))
+nov_CA_counties <- left_join(CA_counties, filter(climate_means, month == 11),
+                             by = c("NAME" = "map_county"))
+dec_CA_counties <- left_join(CA_counties, filter(climate_means, month == 12),
+                             by = c("NAME" = "map_county"))
+
+```
+
+The rest of this document will be several choropleth maps. It would take forever to make a map for every month and variable combination (and we couldn't put that many in the report anyway), so for now I'm just creating some for January and July in order to compare winter and summer weather. We can make specific ones depending on what we decide we want to compare with the fire bubble maps.
+
+(Colors are from viridis library)
+
+(On the temperature maps, the two grey counties (Alpine & Sutter) did not record any temp values)
+
+January:
+
+```{r}
+ggplot(CA_counties) +
+  geom_sf(data = jan_CA_counties, aes(fill = `MLY-PRCP-NORMAL`), colour = "black")+
+  scale_fill_viridis(option = "G")+
+  ggtitle("Average January Rainfall (inches)")
+  
+ggplot(CA_counties) +
+  geom_sf(data = jan_CA_counties, aes(fill = `MLY-SNOW-NORMAL`), colour = "black")+
+  scale_fill_viridis(option = "G")+
+  ggtitle("Average January Snowfall (inches)")
+
+ggplot(CA_counties) +
+  geom_sf(data = jan_CA_counties, aes(fill = `MLY-TAVG-NORMAL`), colour = "black")+
+  scale_fill_viridis(option = "F")+
+  ggtitle("Average January Temperatures (F)")
+
+ggplot(CA_counties) +
+  geom_sf(data = jan_CA_counties, aes(fill = `MLY-TMAX-NORMAL`), colour = "black")+
+  scale_fill_viridis(option = "F")+
+  ggtitle("Average January MAX Temperatures (F)")
+
+ggplot(CA_counties) +
+  geom_sf(data = jan_CA_counties, aes(fill = `MLY-TMIN-NORMAL`), colour = "black")+
+  scale_fill_viridis(option = "F")+
+  ggtitle("Average January MIN Temperatures (F)")
+```
+
+July:
+
+```{r}
+ggplot(CA_counties) +
+  geom_sf(data = jul_CA_counties, aes(fill = `MLY-PRCP-NORMAL`), colour = "black")+
+  scale_fill_viridis(option = "G")+
+  ggtitle("Average July Rainfall (inches)")
+  
+ggplot(CA_counties) +
+  geom_sf(data = jul_CA_counties, aes(fill = `MLY-SNOW-NORMAL`), colour = "black")+
+  scale_fill_viridis(option = "E")+
+  ggtitle("Average July Snowfall (inches)")
+
+ggplot(CA_counties) +
+  geom_sf(data = jul_CA_counties, aes(fill = `MLY-TAVG-NORMAL`), colour = "black")+
+  scale_fill_viridis(option = "F")+
+  ggtitle("Average July Temperatures (F)")
+
+ggplot(CA_counties) +
+  geom_sf(data = jul_CA_counties, aes(fill = `MLY-TMAX-NORMAL`), colour = "black")+
+  scale_fill_viridis(option = "F")+
+  ggtitle("Average July MAX Temperatures (F)")
+
+ggplot(CA_counties) +
+  geom_sf(data = jul_CA_counties, aes(fill = `MLY-TMIN-NORMAL`), colour = "black")+
+  scale_fill_viridis(option = "F")+
+  ggtitle("Average July MIN Temperatures (F)")
+```

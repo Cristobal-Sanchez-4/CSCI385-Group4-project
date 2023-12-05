@@ -1,0 +1,260 @@
+---
+title: "Modeling_2"
+format: html
+editor: visual
+---
+
+## Quarto
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, results = "hold")
+library(tidyverse)
+library(sf)
+library(spData)
+library(tidymodels)
+library(modelr)
+```
+
+```{r}
+#Note: I am using the data with the alterations I made in the "countries&choro" qmd file!
+#If you want to use the same data I did, please run the other qmd first, and then use the same enviroment while running this file
+
+fires_ca
+climate_means
+
+#giving each 
+fires_joined <- left_join(fires_ca, climate_means, 
+                          join_by(map_county == map_county, month == month))
+View(fires_joined)
+```
+
+In this document, I am going to attempt to create a model that predicts fire size, using data of the fires joined to monthly mean climate of each county.
+
+### Some EDA:
+
+Looking at variables vs Fire Size:
+
+```{r}
+ggplot(data = fires_joined, na.rm=TRUE) +
+  geom_point(mapping = aes(x = `MLY-TAVG-NORMAL`, y = FIRE_SIZE), alpha = 0.3)
+
+ggplot(data = fires_joined, na.rm=TRUE) +
+  geom_point(mapping = aes(x = `MLY-TMAX-NORMAL`, y = FIRE_SIZE), alpha = 0.3)
+
+ggplot(data = fires_joined, na.rm=TRUE) +
+  geom_point(mapping = aes(x = `MLY-TMIN-NORMAL`, y = FIRE_SIZE), alpha = 0.3)
+
+ggplot(data = fires_joined, na.rm=TRUE) +
+  geom_point(mapping = aes(x = `MLY-PRCP-NORMAL`, y = FIRE_SIZE), alpha = 0.3)
+
+ggplot(data = fires_joined, na.rm=TRUE) +
+  geom_point(mapping = aes(x = `MLY-SNOW-NORMAL`, y = FIRE_SIZE), alpha = 0.3)
+
+
+#To be honest, I'm not sure what these 3 variables are.
+#The acronyms stand for "diurnal temperature range", "heating degree days", and "cooling degree days" - but I'm not sure what any of that really means.
+ggplot(data = fires_joined, na.rm=TRUE) +
+  geom_point(mapping = aes(x = `MLY-DUTR-NORMAL`, y = FIRE_SIZE), alpha = 0.3)
+
+ggplot(data = fires_joined, na.rm=TRUE) +
+  geom_point(mapping = aes(x = `MLY-HTDD-NORMAL`, y = FIRE_SIZE), alpha = 0.3)
+
+ggplot(data = fires_joined, na.rm=TRUE) +
+  geom_point(mapping = aes(x = `MLY-CLDD-NORMAL`, y = FIRE_SIZE), alpha = 0.3)
+```
+
+Conclusion: We probably cannot use these variables to make a linear regression model that predicts fire size. None of these look like good linear relationships.
+
+How about separating the data by year? Because we have monthly data with no year attached, maybe separating fires out by year will create more linear graphs.
+
+```{r}
+ggplot(data = filter(fires_joined, FIRE_YEAR > 2009), na.rm=TRUE) +
+  geom_point(mapping = aes(x = `MLY-TAVG-NORMAL`, y = FIRE_SIZE), alpha = 0.3) +
+  facet_wrap(~FIRE_YEAR)
+```
+
+It doesn't.
+
+What if we look at only large fires? We don't really care about the tiny fires in terms of danger.
+
+```{r}
+large_fires <- filter(fires_joined, FIRE_SIZE_CLASS != 'A' & FIRE_SIZE_CLASS != 'B' & FIRE_SIZE_CLASS != 'C')
+View(large_fires)
+```
+
+\-
+
+```{r}
+ggplot(data = large_fires, na.rm=TRUE) +
+  geom_point(mapping = aes(x = `MLY-TAVG-NORMAL`, y = FIRE_SIZE), alpha = 0.3)
+
+ggplot(data = large_fires, na.rm=TRUE) +
+  geom_point(mapping = aes(x = `MLY-TMAX-NORMAL`, y = FIRE_SIZE), alpha = 0.3)
+
+ggplot(data = large_fires, na.rm=TRUE) +
+  geom_point(mapping = aes(x = `MLY-PRCP-NORMAL`, y = FIRE_SIZE), alpha = 0.3)
+
+ggplot(data = large_fires, na.rm=TRUE) +
+  geom_point(mapping = aes(x = `MLY-SNOW-NORMAL`, y = FIRE_SIZE), alpha = 0.3)
+```
+
+Still the same pattern overall. What if we try separating by year again?
+
+```{r}
+ggplot(data = filter(large_fires, FIRE_YEAR > 2009), na.rm=TRUE) +
+  geom_point(mapping = aes(x = `MLY-TAVG-NORMAL`, y = FIRE_SIZE), alpha = 0.3) +
+  facet_wrap(~FIRE_YEAR)
+
+ggplot(data = filter(large_fires, FIRE_YEAR > 2009), na.rm=TRUE) +
+  geom_point(mapping = aes(x = `MLY-PRCP-NORMAL`, y = FIRE_SIZE), alpha = 0.3) +
+  facet_wrap(~FIRE_YEAR)
+```
+
+Still no good linear relationship. I'll use the full database of fires instead of just the largest ones.
+
+## Model to predict Fire_Size
+
+```{r}
+test_split <- initial_split(fires_joined, prop = 0.8)
+test <- testing(test_split)
+nontest <- training(test_split)
+
+test
+
+
+val_split <- initial_split(nontest, prop = .8)
+validate <- testing(val_split)
+train <- training(val_split)
+
+train
+validate
+```
+
+\-
+
+```{r}
+size_model <- linear_reg() %>%
+  fit(FIRE_SIZE ~ `MLY-TAVG-NORMAL` + `MLY-PRCP-NORMAL`, data = train)
+
+predictions <- validate %>%
+  bind_cols(predict(size_model, new_data = validate))
+
+ggplot(data = predictions, mapping = aes(x = FIRE_SIZE, y = .pred)) + 
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red")
+```
+
+```{r}
+resids <- mutate(predictions, resid = FIRE_SIZE - .pred)
+dplyr::select(resids, FIRE_SIZE, .pred, resid)
+
+ggplot(data = resids, mapping = aes(x = resid)) +
+  geom_density()
+```
+
+Calculating rsq, etc.
+
+```{r}
+yardstick::rsq(predictions, truth = FIRE_SIZE, estimate = .pred)
+yardstick::mae(predictions, truth = FIRE_SIZE, estimate = .pred)
+yardstick::rmse(predictions, truth = FIRE_SIZE, estimate = .pred)
+```
+
+That is the smallest rsq I have ever seen.
+
+## Model of fire count
+
+Alternate model idea: Can we predict how many fires there have been in a location over the years, given the weather average? (This sounds like a bad idea, but its worth a shot).
+
+```{r}
+fire_groups <- group_by(fires_joined, map_county, month) 
+fire_count <- summarise(fire_groups, count = n()) 
+fire_count  
+#We want county-month pairs with no fires to affect the model! 
+fire_count <- left_join(climate_means,                          
+                        select(fire_count, map_county, month, count),                           join_by(map_county == map_county, month == month)) 
+fire_count$count[is.na(fire_count$count)] <- 0 
+fire_count
+```
+
+\-
+
+```{r}
+ggplot(data = fire_count, na.rm=TRUE) +   
+  geom_point(mapping = aes(x = `MLY-TAVG-NORMAL`, y = count), alpha = 0.3)  
+
+ggplot(data = fire_count, na.rm=TRUE) +   
+  geom_point(mapping = aes(x = `MLY-TMAX-NORMAL`, y = count), alpha = 0.3)  
+
+ggplot(data = fires_joined, na.rm=TRUE) +   
+  geom_point(mapping = aes(x = `MLY-TMIN-NORMAL`, y = FIRE_SIZE), alpha = 0.3)  
+
+ggplot(data = fire_count, na.rm=TRUE) +   
+  geom_point(mapping = aes(x = `MLY-PRCP-NORMAL`, y = count), alpha = 0.3)  
+
+ggplot(data = fire_count, na.rm=TRUE) +   
+  geom_point(mapping = aes(x = `MLY-SNOW-NORMAL`, y = count), alpha = 0.3)
+```
+
+This might be SLIGHTLY more linear???
+
+Actual modeling:
+
+```{r}
+test_split <- initial_split(fire_count, prop = 0.8)
+test <- testing(test_split)
+nontest <- training(test_split)
+
+test
+
+
+val_split <- initial_split(nontest, prop = .8)
+validate <- testing(val_split)
+train <- training(val_split)
+
+train
+validate
+```
+
+\-
+
+```{r}
+count_model <- linear_reg() %>%
+  fit(count ~ `MLY-TAVG-NORMAL` + `MLY-PRCP-NORMAL`, data = train)
+
+predictions <- validate %>%
+  bind_cols(predict(size_model, new_data = validate))
+
+ggplot(data = predictions, mapping = aes(x = count, y = .pred)) + 
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red")
+```
+
+Better than the last model?
+
+```{r}
+resids <- mutate(predictions, resid = count - .pred)
+select(resids, month, count, .pred, resid)
+
+ggplot(data = resids, mapping = aes(x = resid)) +
+  geom_density()
+```
+
+It's LESS bad that the size prediction, I guess??
+
+Actually, it might be worse. Guessing 2000 fires off is really bad.
+
+```{r}
+arrange(select(resids, month, count, .pred, resid), desc(resid))
+
+```
+
+Let's just look at r-squared, etc.
+
+```{r}
+yardstick::rsq(predictions, truth = count, estimate = .pred)
+yardstick::mae(predictions, truth = count, estimate = .pred)
+yardstick::rmse(predictions, truth = count, estimate = .pred)
+```
+
+I have no idea what's happening in the above output. I guess R doesn't like calculating the error for grouped datasets? I don't think calculating the amount of fires in a given county will be that helpful to us anyway, but I'm leaving this in here in case we can use it somehow.
